@@ -13,6 +13,8 @@ import torch.nn.functional as F
 
 from sam2.modeling.sam2_utils import DropPath, get_clones, LayerNorm2d
 
+from ytools.bench import test_torch_cuda_time
+
 
 class MaskDownSampler(nn.Module):
     """
@@ -165,6 +167,13 @@ class MemoryEncoder(nn.Module):
         # sigmoid, so that less domain shift from gt masks which are bool
         if not skip_mask_sigmoid:
             masks = F.sigmoid(masks)
+
+        x,pos = self.inference_memory(pix_feat, masks)
+
+        return {"vision_features": x, "vision_pos_enc": [pos]}
+
+    @test_torch_cuda_time()
+    def inference_memory(self,pix_feat: torch.Tensor,masks: torch.Tensor):
         masks = self.mask_downsampler(masks)
 
         ## Fuse pix_feats and downsampled masks
@@ -177,5 +186,8 @@ class MemoryEncoder(nn.Module):
         x = self.out_proj(x)
 
         pos = self.position_encoding(x).to(x.dtype)
+        return x, pos
 
-        return {"vision_features": x, "vision_pos_enc": [pos]}
+
+
+
