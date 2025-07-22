@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-from typing import Tuple
+from typing import Tuple, List
 
 import torch
 import torch.nn as nn
@@ -14,6 +14,8 @@ import torch.nn.functional as F
 from sam2.modeling.sam2_utils import DropPath, get_clones, LayerNorm2d
 
 from ytools.bench import test_torch_cuda_time
+from ytools.executor import ModelExectuor
+from ytools.onnxruntime import OnnxRuntimeExecutor
 
 
 class MaskDownSampler(nn.Module):
@@ -157,6 +159,47 @@ class MemoryEncoder(nn.Module):
         if out_dim != in_dim:
             self.out_proj = nn.Conv2d(in_dim, out_dim, kernel_size=1)
 
+        # --- 新增代码 ---
+        # 1. 初始化 backend_contexts 列表
+        self.backend_contexts: List[ModelExectuor] = []
+
+        # 2. 初始化方法指针，默认指向 PyTorch 实现
+        self.inference_memory = self.inference_memory_torch
+
+        # 3. 设置默认后端
+        self.set_runtime_backend(backend="torch")
+
+    def set_runtime_backend(self, backend="torch", args: dict = None):
+        """
+        动态设置 MemoryEncoder 的运行时后端 (torch 或 onnxruntime)。
+        """
+        self.backend_contexts = []
+        if backend.lower() == "torch":
+            self.inference_memory = self.inference_memory_torch
+        elif backend.lower() == "onnxruntime":
+            self.inference_memory = self.inference_memory_onnxruntime
+            assert args and "model_paths" in args, '需要提供 "model_paths" 参数来指定 ONNX 模型路径'
+
+            model_path = args["model_paths"][0]
+            providers = args.get("providers", None)
+            executor = OnnxRuntimeExecutor(model_path, providers=providers)
+
+            print(f"Warming up ONNX Runtime for MemoryEncoder ({model_path})...")
+            try:
+                warmup_device = torch.device("cuda" if torch.cuda.is_available() and "CUDAExecutionProvider" in (
+                            providers or ["CUDAExecutionProvider"]) else "cpu")
+                pixel_features_warmup = torch.randn(1, 256, 64, 64, device=warmup_device)
+                mask_for_memory_warmup = torch.rand(1, 1, 1024, 1024, device=warmup_device)
+                warmup_inputs = [pixel_features_warmup, mask_for_memory_warmup]
+                executor.warmup(warmup_inputs)
+                print("MemoryEncoder warmup successful.")
+            except Exception as e:
+                print(f"[Warning] MemoryEncoder ONNX warmup failed: {e}")
+
+            self.backend_contexts.append(executor)
+        else:
+            raise ValueError(f"不支持的后端: {backend}")
+
     def forward(
         self,
         pix_feat: torch.Tensor,
@@ -172,21 +215,30 @@ class MemoryEncoder(nn.Module):
 
         return {"vision_features": x, "vision_pos_enc": [pos]}
 
+        # --- 新增: PyTorch 版本的核心逻辑 ---
     @test_torch_cuda_time()
-    def inference_memory(self,pix_feat: torch.Tensor,masks: torch.Tensor):
-        masks = self.mask_downsampler(masks)
-
-        ## Fuse pix_feats and downsampled masks
-        # in case the visual features are on CPU, cast them to CUDA
-        pix_feat = pix_feat.to(masks.device)
-
-        x = self.pix_feat_proj(pix_feat)
-        x = x + masks
+    def inference_memory_torch(self, pix_feat: torch.Tensor, masks: torch.Tensor):
+        masks_embedded = self.mask_downsampler(masks)
+        pix_feat_processed = pix_feat.to(masks_embedded.device)
+        x = self.pix_feat_proj(pix_feat_processed)
+        x = x + masks_embedded
         x = self.fuser(x)
         x = self.out_proj(x)
-
         pos = self.position_encoding(x).to(x.dtype)
         return x, pos
+
+    # --- 新增: ONNX 版本的核心逻辑 ---
+    @test_torch_cuda_time()
+    def inference_memory_onnxruntime(self, pix_feat: torch.Tensor, masks: torch.Tensor):
+        inputs = [pix_feat, masks]
+        executor = self.backend_contexts[0]
+        outputs = executor.Inference(inputs, output_type="torch")
+
+        x, pos = outputs[0], outputs[1]
+        device = pix_feat.device
+        return x.to(device), pos.to(device)
+
+
 
 
 

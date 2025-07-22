@@ -9,11 +9,15 @@ import torch.distributed
 import torch.nn.functional as F
 
 from torch.nn.init import trunc_normal_
-
+import os
 from sam2.modeling.sam.mask_decoder import MaskDecoder
 from sam2.modeling.sam.prompt_encoder import PromptEncoder
 from sam2.modeling.sam.transformer import TwoWayTransformer
 from sam2.modeling.sam2_utils import get_1d_sine_pe, MLP, select_closest_cond_frames
+from ytools.bench import test_torch_cuda_time
+from ytools.onnxruntime import OnnxRuntimeExecutor
+from ytools.executor import ModelExectuor
+from typing import List
 
 # a large negative value as a placeholder score for missing objects
 NO_OBJ_SCORE = -1024.0
@@ -193,6 +197,50 @@ class SAM2Base(torch.nn.Module):
                 fullgraph=True,
                 dynamic=False,
             )
+
+        self.backend_contexts = []  # type:List[ModelExectuor]
+        self.inference_image = self.inference_image_torch
+        self.inference_image_for_set_image = self.inference_image_for_set_image_torch
+
+        self.set_runtime_backend(backend="torch")
+
+    def set_runtime_backend(self, backend="torch", args: dict = None):
+        self.backend_contexts = []
+        if backend.lower() == "torch":
+            self.inference_image = self.inference_image_torch
+            self.inference_image_for_set_image = (
+                self.inference_image_for_set_image_torch
+            )
+        elif backend.lower() == "onnxruntime":
+            # self.image_encoder=None
+            self.inference_image = self.inference_image_onnxruntime
+            assert "model_paths" in args, 'need args["model_paths"] to set *.onnx path'
+
+            model_paths = args["model_paths"]
+            if isinstance(model_paths, str):
+                model_paths = [model_paths]
+
+            forward_image_executor = OnnxRuntimeExecutor(
+                model_paths[0], providers=args.get("providers", None)
+            )
+            forward_image_executor.warmup([torch.randn(1, 3, 1024, 1024)])
+            self.backend_contexts.append(forward_image_executor)
+
+            if len(model_paths) < 2:
+                self.inference_image_for_set_image = (
+                    self.inference_image_for_set_image_torch  # run onnxruntime in which
+                )
+            else:
+                self.inference_image_for_set_image = (
+                    self.inference_image_for_set_image_onnxruntime  # run onnxruntime in which
+                )
+                set_image_executor = OnnxRuntimeExecutor(
+                    model_paths[1], providers=args.get("providers", None)
+                )
+                set_image_executor.warmup([torch.randn(1, 3, 1024, 1024)])
+                self.backend_contexts.append(set_image_executor)
+        else:
+            raise Exception(f"unsupported")
 
     @property
     def device(self):
@@ -482,7 +530,11 @@ class SAM2Base(torch.nn.Module):
         }
         return backbone_out
 
-    def inference_image(self, img_batch: torch.Tensor):
+    @test_torch_cuda_time()
+    def inference_image_torch(self, img_batch: torch.Tensor):
+        """
+        torch version call by self.forward_image
+        """
         backbone_out = self.image_encoder(img_batch)
         if self.use_high_res_features_in_sam:
             backbone_out["backbone_fpn"][0] = self.sam_mask_decoder.conv_s0(
@@ -497,7 +549,17 @@ class SAM2Base(torch.nn.Module):
             *backbone_out["backbone_fpn"],
         )
 
-    def inference_image_for_set_image(self, img_batch: torch.Tensor):
+    @test_torch_cuda_time()
+    def inference_image_onnxruntime(self, img_batch: torch.Tensor):
+        """
+        onnxruntime version call by self.forward_image
+        """
+        outs = self.backend_contexts[0].Inference([img_batch], output_type="torch")
+        outputs = [o.to(img_batch.device) for o in outs]
+        return tuple(outputs)
+
+    @test_torch_cuda_time()
+    def inference_image_for_set_image_torch(self, img_batch: torch.Tensor):
         backbone_out = self.forward_image(img_batch)
         _, vision_feats, _, feat_sizes = self._prepare_backbone_features(backbone_out)
         # Add no_mem_embed, which is added to the lowest rest feat. map during training on videos
@@ -509,6 +571,12 @@ class SAM2Base(torch.nn.Module):
             for feat, feat_size in zip(vision_feats, feat_sizes)
         ]
         return feats[0], feats[1], feats[2]
+
+    @test_torch_cuda_time()
+    def inference_image_for_set_image_onnxruntime(self, img_batch: torch.Tensor):
+        outs = self.backend_contexts[1].Inference([img_batch], output_type="torch")
+        outputs = [o.to(img_batch.device) for o in outs]
+        return tuple(outputs)
 
     def _prepare_backbone_features(self, backbone_out):
         """Prepare and flatten visual features."""
