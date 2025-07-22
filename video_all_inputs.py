@@ -146,7 +146,7 @@ if __name__ == "__main__":
     sam2_checkpoint = "./sam2/checkpoints/sam2.1_hiera_large.pt"
     model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
     predictor = build_sam2_video_predictor(model_cfg, sam2_checkpoint, device=device)
-    video_path = r"D:\Mongo\sam2_opt\sam2\notebooks\videos\bedroom.mp4"  # <--- 你的视频路径
+    video_path = r"./sam2/notebooks/videos/bedroom.mp4"  # <--- 你的视频路径
     initial_frame_idx = 0
     object_id = 1
     # 选择要测试的模式
