@@ -38,6 +38,67 @@ class SAM2VideoPredictor(SAM2Base):
         self.clear_non_cond_mem_around_input = clear_non_cond_mem_around_input
         self.add_all_frames_to_correct_as_cond = add_all_frames_to_correct_as_cond
 
+
+    # --- 在 SAM2VideoPredictor 中重写 set_runtime_backend ---
+    def set_runtime_backend(self, backend="torch", args: dict = None):
+        """
+        为 SAM2VideoPredictor 的子模块 MemoryEncoder 和 PromptEncoder 设置运行时后端。
+        这个版本显式地控制所有子模块，并且不调用父类的 set_runtime_backend，以避免逻辑冲突。
+
+        Args:
+            backend (str): "torch" 或 "onnxruntime".
+            args (dict): 包含 "model_paths" 和 "providers" 的字典。
+                "model_paths" (list of str or None): ONNX 模型路径列表。
+                    - [0]: memory_encoder 的 ONNX 路径
+                    - [1]: prompt_encoder 的 ONNX 路径
+        """
+        print(f"Setting runtime backend to: '{backend}' for sub-modules (Memory & Prompt Encoder).")
+
+        # 用父类来set ImageEncoder
+        super().set_runtime_backend(backend="torch")
+
+        if backend.lower() == "torch":
+            # --- 切换所有相关子模块回 Torch ---
+            if hasattr(self, "memory_encoder") and hasattr(self.memory_encoder, "set_runtime_backend"):
+                self.memory_encoder.set_runtime_backend(backend="torch")
+
+            if hasattr(self, "sam_prompt_encoder") and hasattr(self.sam_prompt_encoder, "set_runtime_backend"):
+                self.sam_prompt_encoder.set_runtime_backend(backend="torch")
+
+        elif backend.lower() == "onnxruntime":
+            assert args and "model_paths" in args, '需要提供 "model_paths" 参数来设置 ONNX 路径'
+
+            model_paths = args["model_paths"]
+            if isinstance(model_paths, str):
+                model_paths = [model_paths]
+
+            providers = args.get("providers", None)
+            onnx_args = {"providers": providers}
+
+            # --- 按顺序配置 ONNX 后端 ---
+
+            # 1. 配置 Memory Encoder
+            if len(model_paths) > 0 and model_paths[0] is not None:
+                print("Configuring ONNX backend for MemoryEncoder...")
+                onnx_args["model_paths"] = [model_paths[0]]
+                if hasattr(self, "memory_encoder") and hasattr(self.memory_encoder, "set_runtime_backend"):
+                    self.memory_encoder.set_runtime_backend(backend="onnxruntime", args=onnx_args)
+            else:
+                if hasattr(self, "memory_encoder") and hasattr(self.memory_encoder, "set_runtime_backend"):
+                    self.memory_encoder.set_runtime_backend(backend="torch")
+
+            # 2. 配置 Prompt Encoder
+            if len(model_paths) > 1 and model_paths[1] is not None:
+                print("Configuring ONNX backend for PromptEncoder...")
+                onnx_args["model_paths"] = [model_paths[1]]
+                if hasattr(self, "sam_prompt_encoder") and hasattr(self.sam_prompt_encoder, "set_runtime_backend"):
+                    self.sam_prompt_encoder.set_runtime_backend(backend="onnxruntime", args=onnx_args)
+            else:
+                if hasattr(self, "sam_prompt_encoder") and hasattr(self.sam_prompt_encoder, "set_runtime_backend"):
+                    self.sam_prompt_encoder.set_runtime_backend(backend="torch")
+        else:
+            raise ValueError(f"不支持的后端: {backend}")
+
     @torch.inference_mode()
     def init_state(
         self,
