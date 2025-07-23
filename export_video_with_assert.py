@@ -30,60 +30,60 @@ def simplify_and_save(onnx_model, save_path):
         onnx.save(onnx_model, save_path)
 
 
-@torch.no_grad()
-def export_image_encoder_with_assertions(onnx_name="video_image_encoder.onnx", simplify_onnx=True, override=False):
-    """
-    导出 Image Encoder，并验证其对输入批次大小变化的响应。
-    """
-    global predictor, onnx_path
-    print("\n--- [Image Encoder] Assertion and Export ---")
-    os.makedirs(onnx_path, exist_ok=True)
-    save_path = os.path.join(onnx_path, onnx_name)
-    if os.path.exists(save_path) and not override:
-        print(f"Skipping, {save_path} already exists.")
-        return
+# @torch.no_grad()
+# def export_image_encoder_with_assertions(onnx_name="video_image_encoder.onnx", simplify_onnx=True, override=False):
+#     """
+#     导出 Image Encoder，并验证其对输入批次大小变化的响应。
+#     """
+#     global predictor, onnx_path
+#     print("\n--- [Image Encoder] Assertion and Export ---")
+#     os.makedirs(onnx_path, exist_ok=True)
+#     save_path = os.path.join(onnx_path, onnx_name)
+#     if os.path.exists(save_path) and not override:
+#         print(f"Skipping, {save_path} already exists.")
+#         return
 
-    original_forward = predictor.forward
-    predictor.forward = predictor.inference_image
-    #  上下文：在导出图像编码器之前，代码首先用不同批次大小的输入来测试模型。
-    #  base_input 的批次大小是 1（shape: [1, 3, 1024, 1024]）。
-    #  variant_input 的批次大小是 3（shape: [3, 3, 1024, 1024]）。
-    #  具体解释：这个断言检查两件事：
-    #  var_shape[0] == 3：确认当输入批次为3时，输出的批次维度也相应地变成了3。
-    #  base_shape[1:] == var_shape[1:]：确认除了批次维度之外，输出的其他所有维度（如通道数、特征图尺寸）都保持不变。
-    #  目的：这个assert确保了模型的第一维度（批次大小）是动态的，而其他维度是静态的。
-    print(">>> 1. Assertion Phase: Verifying dynamic batch size...")
-    base_input = torch.randn(1, 3, 1024, 1024).to(device)
-    base_outputs = predictor(base_input)
-    base_shapes = [o.shape for o in base_outputs]
-    # vision_features: [1, 256, 64, 64]
-    # vision_pos_enc0: [1, 256, 64, 64] ...
-    # backbone_fpn0: [1, 256, 64, 64]  ...
+#     original_forward = predictor.forward
+#     predictor.forward = predictor.inference_image
+#     #  上下文：在导出图像编码器之前，代码首先用不同批次大小的输入来测试模型。
+#     #  base_input 的批次大小是 1（shape: [1, 3, 1024, 1024]）。
+#     #  variant_input 的批次大小是 3（shape: [3, 3, 1024, 1024]）。
+#     #  具体解释：这个断言检查两件事：
+#     #  var_shape[0] == 3：确认当输入批次为3时，输出的批次维度也相应地变成了3。
+#     #  base_shape[1:] == var_shape[1:]：确认除了批次维度之外，输出的其他所有维度（如通道数、特征图尺寸）都保持不变。
+#     #  目的：这个assert确保了模型的第一维度（批次大小）是动态的，而其他维度是静态的。
+#     print(">>> 1. Assertion Phase: Verifying dynamic batch size...")
+#     base_input = torch.randn(1, 3, 1024, 1024).to(device)
+#     base_outputs = predictor(base_input)
+#     base_shapes = [o.shape for o in base_outputs]
+#     # vision_features: [1, 256, 64, 64]
+#     # vision_pos_enc0: [1, 256, 64, 64] ...
+#     # backbone_fpn0: [1, 256, 64, 64]  ...
 
-    variant_input = torch.randn(3, 3, 1024, 1024).to(device)
-    variant_outputs = predictor(variant_input)
-    variant_shapes = [o.shape for o in variant_outputs]
+#     variant_input = torch.randn(3, 3, 1024, 1024).to(device)
+#     variant_outputs = predictor(variant_input)
+#     variant_shapes = [o.shape for o in variant_outputs]
 
-    for i, (base_shape, var_shape) in enumerate(zip(base_shapes, variant_shapes)):
-        assert var_shape[0] == 3 and base_shape[1:] == var_shape[1:]
-        f"Mismatch at output {i}: base shape = {base_shape}, variant shape = {var_shape}"
-    print("  - Assertions PASSED: Batch dimension is dynamic, other dimensions are static.")
+#     for i, (base_shape, var_shape) in enumerate(zip(base_shapes, variant_shapes)):
+#         assert var_shape[0] == 3 and base_shape[1:] == var_shape[1:]
+#         f"Mismatch at output {i}: base shape = {base_shape}, variant shape = {var_shape}"
+#     print("  - Assertions PASSED: Batch dimension is dynamic, other dimensions are static.")
 
-    print("\n>>> 2. Export Phase...")
-    input_names = ["image"]
-    output_names = ["vision_features", "vision_pos_enc0", "vision_pos_enc1", "vision_pos_enc2",
-                    "backbone_fpn0", "backbone_fpn1", "backbone_fpn2"]
-    dynamic_axes = {name: {0: "N"} for name in input_names + output_names}
+#     print("\n>>> 2. Export Phase...")
+#     input_names = ["image"]
+#     output_names = ["vision_features", "vision_pos_enc0", "vision_pos_enc1", "vision_pos_enc2",
+#                     "backbone_fpn0", "backbone_fpn1", "backbone_fpn2"]
+#     dynamic_axes = {name: {0: "N"} for name in input_names + output_names}
 
-    torch.onnx.export(predictor, base_input, save_path, export_params=True, opset_version=17, do_constant_folding=True,
-                      input_names=input_names,
-                      output_names=output_names,
-                      dynamic_axes=dynamic_axes)
+#     torch.onnx.export(predictor, base_input, save_path, export_params=True, opset_version=17, do_constant_folding=True,
+#                       input_names=input_names,
+#                       output_names=output_names,
+#                       dynamic_axes=dynamic_axes)
 
-    predictor.forward = original_forward
-    print(f"Exported to {save_path}")
-    if simplify_onnx:
-        simplify_and_save(onnx.load(save_path), save_path.replace(".onnx", "_opt.onnx"))
+#     predictor.forward = original_forward
+#     print(f"Exported to {save_path}")
+#     if simplify_onnx:
+#         simplify_and_save(onnx.load(save_path), save_path.replace(".onnx", "_opt.onnx"))
 
 
 @torch.no_grad()
@@ -186,163 +186,278 @@ def export_prompt_encoder_with_assertions(onnx_name="video_prompt_encoder.onnx",
         simplify_and_save(onnx.load(save_path), save_path.replace(".onnx", "_opt.onnx"))
 
 
-# 输入 tokens 的数量是动态的，但 MaskDecoder 的输出形状是静态的
+# # 输入 tokens 的数量是动态的，但 MaskDecoder 的输出形状是静态的
+# @torch.no_grad()
+# def export_mask_decoder_with_assertions(onnx_name="video_mask_decoder.onnx", simplify_onnx=True, override=False):
+#     """
+#     导出 Mask Decoder，并验证其对输入 token 数量变化的响应。
+#     模拟 MaskDecoder 的输入 tokens，并确认其输出形状是静态的。
+#     """
+#     global predictor, onnx_path
+#     print("\n--- [Mask Decoder] Assertion and Export ---")
+#     os.makedirs(onnx_path, exist_ok=True)
+#     save_path = os.path.join(onnx_path, onnx_name)
+#     if os.path.exists(save_path) and not override:
+#         print(f"Skipping, {save_path} already exists.")
+#         return
+
+#     mask_decoder = predictor.sam_mask_decoder
+#     original_forward = mask_decoder.forward
+#     mask_decoder.forward = mask_decoder.inference_predict_masks
+
+#     # --- 验证阶段 ---
+#     print(">>> 1. Assertion Phase: Verifying dynamic number of tokens...")
+
+#     src = torch.randn(1, 256, 64, 64, device=device)
+#     pos_src = torch.randn(1, 256, 64, 64, device=device)
+#     high_res_feature0 = torch.randn(1, 32, 256, 256, device=device)
+#     high_res_feature1 = torch.randn(1, 64, 128, 128, device=device)
+
+#     num_output_tokens = 1 + 1 + mask_decoder.num_mask_tokens  # obj_score_token + iou_token + mask_tokens
+#     output_tokens = torch.randn(1, num_output_tokens, predictor.hidden_dim, device=device)
+
+#     # 场景 1: 2个外部prompt tokens
+#     print("  - Running with baseline input (2 external prompt tokens)...")
+#     prompt_tokens_base = torch.randn(1, 2, predictor.hidden_dim, device=device)
+#     tokens_base = torch.cat([output_tokens, prompt_tokens_base], dim=1)
+#     args_base = (src, tokens_base, pos_src, high_res_feature0, high_res_feature1)
+#     base_outputs = mask_decoder.forward(*args_base)
+#     base_shapes = [o.shape for o in base_outputs]
+#     print(f"    Total input tokens: {tokens_base.shape[1]}. Output shapes: {base_shapes}")
+
+#     # 场景 2: 6个外部prompt tokens
+#     print("  - Running with variant input (6 external prompt tokens)...")
+#     prompt_tokens_variant = torch.randn(1, 6, predictor.hidden_dim, device=device)
+#     tokens_variant = torch.cat([output_tokens, prompt_tokens_variant], dim=1)
+#     args_variant = (src, tokens_variant, pos_src, high_res_feature0, high_res_feature1)
+#     variant_outputs = mask_decoder.forward(*args_variant)
+#     variant_shapes = [o.shape for o in variant_outputs]
+#     print(f"    Total input tokens: {tokens_variant.shape[1]}. Output shapes: {variant_shapes}")
+
+#     # 断言验证：输出形状应是静态的，因为它们由固定的 num_mask_tokens 决定。
+#     print("  - Asserting shape changes...")
+#     for i in range(len(base_shapes)):
+#         assert base_shapes[i] == variant_shapes[i], \
+#             f"Output {i} shape should be static, but changed from {base_shapes[i]} to {variant_shapes[i]}"
+#     print("  - Assertions PASSED: All output shapes are static, correctly handling dynamic number of prompt tokens.")
+
+#     # --- 导出阶段 ---
+#     print("\n>>> 2. Export Phase...")
+#     output_names = ["masks", "iou_pred", "mask_tokens_out", "object_score_logits"]
+#     torch.onnx.export(mask_decoder,
+#                       args_variant,
+#                       save_path,
+#                       export_params=True,
+#                       opset_version=17,
+#                       do_constant_folding=True,
+#                       input_names=["src", "tokens", "pos_src", "high_res_feature0", "high_res_feature1"],
+#                       output_names=output_names,
+#                       dynamic_axes={
+#                           "src": {0: "N"},
+#                           "tokens": {0: "N", 1: "num_total_tokens"},  # 总token数是动态的
+#                           "pos_src": {0: "N"},
+#                           "high_res_feature0": {0: "N"},
+#                           "high_res_feature1": {0: "N"},
+#                           # 输出维度是固定的（除了批次N）
+#                           "masks": {0: "N"},
+#                           "iou_pred": {0: "N"},
+#                           "mask_tokens_out": {0: "N"},
+#                           "object_score_logits": {0: "N"}
+#                       })
+
+#     mask_decoder.forward = original_forward
+#     print(f"Exported to {save_path}")
+#     if simplify_onnx:
+#         simplify_and_save(onnx.load(save_path), save_path.replace(".onnx", "_opt.onnx"))
+
+
+
+# # SAM2VideoPredictor 总是会将多物体/多掩码的情况转换成一个更大的批次（batch），
+# # 对于 MemoryEncoder 这个独立的模块而言，它永远只会接收到批处理化的单通道掩码输入。
+# # 这意味着，在 MemoryEncoder 的视角里，不存在“单掩码 vs 多掩码”这两种模式的区别。
+# # 它看到的永远是 (N, 1, H, W) 格式的 masks 和 (N, C, H, W) 格式的 pix_feat，其中 N 是一个可变的批次大小。
+# @torch.no_grad()
+# def export_memory_encoder_with_assertions(onnx_name="video_memory_encoder.onnx", simplify_onnx=True, override=False):
+#     """
+#     导出 Memory Encoder，并验证其对输入批次大小变化的响应。
+#     【最终无Wrapper、无新方法版】：通过修改原始 forward 并直接导出 inference_memory 实现。
+#     """
+#     global predictor, onnx_path
+#     print("\n--- [Memory Encoder] Assertion and Export ---")
+#     os.makedirs(onnx_path, exist_ok=True)
+#     save_path = os.path.join(onnx_path, onnx_name)
+#     if os.path.exists(save_path) and not override:
+#         print(f"Skipping, {save_path} already exists.")
+#         return
+
+#     module = predictor.memory_encoder
+#     original_forward = module.forward
+#     module.forward = module.inference_memory
+
+#     # --- 验证阶段 ---
+#     print(">>> 1. Assertion Phase: Verifying dynamic batch size...")
+
+#     # 场景 1: 基准输入 (批次大小 N=1)
+#     print("  - Running with baseline input (N=1)...")
+#     pix_feat_base = torch.randn(1, 256, 64, 64, device=device)
+#     mask_base = torch.rand(1, 1, 1024, 1024, device=device)
+#     args_base = (pix_feat_base, mask_base)
+#     base_mem_feat, _ = module.forward(*args_base)  # 调用的是 inference_memory
+#     print(f"    Baseline output shape: {base_mem_feat.shape}")
+
+#     # 场景 2: 可变输入 (批次大小 N=3)
+#     print("  - Running with variant input (N=3)...")
+#     pix_feat_variant = torch.randn(3, 256, 64, 64, device=device)
+#     mask_variant = torch.rand(3, 1, 1024, 1024, device=device)
+#     args_variant = (pix_feat_variant, mask_variant)
+#     variant_mem_feat, _ = module.forward(*args_variant)  # 调用的是 inference_memory
+#     print(f"    Variant output shape: {variant_mem_feat.shape}")
+
+#     # 断言验证
+#     print("  - Asserting shape changes...")
+#     assert variant_mem_feat.shape[0] == 3
+#     assert base_mem_feat.shape[1:] == variant_mem_feat.shape[1:]
+#     print("  - Assertions PASSED: Model correctly handles dynamic batch size.")
+
+#     # --- 导出阶段 ---
+#     print("\n>>> 2. Export Phase...")
+
+#     # 直接导出 module，因为它的 forward 现在指向 inference_memory，是完全 ONNX 友好的
+#     torch.onnx.export(
+#         module,
+#         args_variant,
+#         save_path,
+#         export_params=True,
+#         opset_version=17,
+#         do_constant_folding=True,
+#         input_names=["pixel_features", "mask_for_memory"],
+#         output_names=["mask_memory_features", "mask_memory_pos_enc"],
+#         dynamic_axes={
+#             "pixel_features": {0: "N"},
+#             "mask_for_memory": {0: "N"},
+#             "mask_memory_features": {0: "N"},
+#             "mask_memory_pos_enc": {0: "N"}
+#         }
+#     )
+
+#     # 清理现场，恢复原始的 forward 方法
+#     module.forward = original_forward
+
+#     print(f"Exported to {save_path}")
+#     if simplify_onnx:
+#         simplify_and_save(onnx.load(save_path), save_path.replace(".onnx", "_opt.onnx"))
+    
+import torch.nn as nn
+
+
 @torch.no_grad()
-def export_mask_decoder_with_assertions(onnx_name="video_mask_decoder.onnx", simplify_onnx=True, override=False):
+def export_memory_attention_with_assertions(onnx_name="video_memory_attention.onnx", simplify_onnx=True, override=False):
     """
-    导出 Mask Decoder，并验证其对输入 token 数量变化的响应。
-    模拟 MaskDecoder 的输入 tokens，并确认其输出形状是静态的。
+    导出 Memory Attention 模块, 并验证其对动态输入 (批次, memory token数量) 的响应。
+    此导出目标是重构后的 `inference_memory_attention` 方法，该方法是 ONNX 友好的。
     """
     global predictor, onnx_path
-    print("\n--- [Mask Decoder] Assertion and Export ---")
+    print("\n--- [Memory Attention] Assertion and Export ---")
     os.makedirs(onnx_path, exist_ok=True)
     save_path = os.path.join(onnx_path, onnx_name)
     if os.path.exists(save_path) and not override:
         print(f"Skipping, {save_path} already exists.")
         return
 
-    mask_decoder = predictor.sam_mask_decoder
-    original_forward = mask_decoder.forward
-    mask_decoder.forward = mask_decoder.inference_predict_masks
+    try:
+        module = predictor.memory_attention
+    except AttributeError:
+         print("[ERROR] Could not find 'predictor.memory_attention'.")
+         return
 
-    # --- 验证阶段 ---
-    print(">>> 1. Assertion Phase: Verifying dynamic number of tokens...")
+    # ONNX 包装器，处理数据布局转置，以匹配 ONNX 期望的纯计算图
+    class OnnxWrapper(nn.Module):
+        def __init__(self, mem_attn_module):
+            super().__init__()
+            self.mem_attn_module = mem_attn_module
+            # 将 num_obj_ptr_tokens 固定为0进行导出，以获得最干净、最通用的计算图
+            self.num_obj_ptr_tokens = 0
 
-    src = torch.randn(1, 256, 64, 64, device=device)
-    pos_src = torch.randn(1, 256, 64, 64, device=device)
-    high_res_feature0 = torch.randn(1, 32, 256, 256, device=device)
-    high_res_feature1 = torch.randn(1, 64, 128, 128, device=device)
+        def forward(self, curr, memory, curr_pos, memory_pos):
+            # 1. 我们的 inference_memory_attention 期望 batch-first 输入 (B, S, D)
+            #    而 MemoryAttention.forward 接收 seq-first 输入 (S, B, D)
+            #    所以我们需要在这里进行转置。
+            curr_bf = curr.transpose(0, 1)
+            memory_bf = memory.transpose(0, 1)
+            curr_pos_bf = curr_pos.transpose(0, 1)
+            memory_pos_bf = memory_pos.transpose(0, 1)
 
-    num_output_tokens = 1 + 1 + mask_decoder.num_mask_tokens  # obj_score_token + iou_token + mask_tokens
-    output_tokens = torch.randn(1, num_output_tokens, predictor.hidden_dim, device=device)
+            # 2. 调用纯计算函数
+            output_bf = self.mem_attn_module.inference_memory_attention(
+                curr_bf, memory_bf, curr_pos_bf, memory_pos_bf, self.num_obj_ptr_tokens
+            )
+            
+            # 3. 将结果转置回 seq-first (S, B, D) 以匹配原始输出格式
+            return output_bf.transpose(0, 1)
 
-    # 场景 1: 2个外部prompt tokens
-    print("  - Running with baseline input (2 external prompt tokens)...")
-    prompt_tokens_base = torch.randn(1, 2, predictor.hidden_dim, device=device)
-    tokens_base = torch.cat([output_tokens, prompt_tokens_base], dim=1)
-    args_base = (src, tokens_base, pos_src, high_res_feature0, high_res_feature1)
-    base_outputs = mask_decoder.forward(*args_base)
-    base_shapes = [o.shape for o in base_outputs]
-    print(f"    Total input tokens: {tokens_base.shape[1]}. Output shapes: {base_shapes}")
+    onnx_export_model = OnnxWrapper(module).eval()
 
-    # 场景 2: 6个外部prompt tokens
-    print("  - Running with variant input (6 external prompt tokens)...")
-    prompt_tokens_variant = torch.randn(1, 6, predictor.hidden_dim, device=device)
-    tokens_variant = torch.cat([output_tokens, prompt_tokens_variant], dim=1)
-    args_variant = (src, tokens_variant, pos_src, high_res_feature0, high_res_feature1)
-    variant_outputs = mask_decoder.forward(*args_variant)
-    variant_shapes = [o.shape for o in variant_outputs]
-    print(f"    Total input tokens: {tokens_variant.shape[1]}. Output shapes: {variant_shapes}")
+    # --- 验证与导出阶段 ---
+    print(">>> 1. Assertion and Export Phase (based on real runtime data)...")
 
-    # 断言验证：输出形状应是静态的，因为它们由固定的 num_mask_tokens 决定。
-    print("  - Asserting shape changes...")
-    for i in range(len(base_shapes)):
-        assert base_shapes[i] == variant_shapes[i], \
-            f"Output {i} shape should be static, but changed from {base_shapes[i]} to {variant_shapes[i]}"
-    print("  - Assertions PASSED: All output shapes are static, correctly handling dynamic number of prompt tokens.")
+    # 从调试信息中获取的精确维度
+    d_model = 256  # for curr
+    mem_dim = 64   # for memory
+    curr_seq_len = 4096
 
-    # --- 导出阶段 ---
-    print("\n>>> 2. Export Phase...")
-    output_names = ["masks", "iou_pred", "mask_tokens_out", "object_score_logits"]
-    torch.onnx.export(mask_decoder,
-                      args_variant,
-                      save_path,
-                      export_params=True,
-                      opset_version=17,
-                      do_constant_folding=True,
-                      input_names=["src", "tokens", "pos_src", "high_res_feature0", "high_res_feature1"],
-                      output_names=output_names,
-                      dynamic_axes={
-                          "src": {0: "N"},
-                          "tokens": {0: "N", 1: "num_total_tokens"},  # 总token数是动态的
-                          "pos_src": {0: "N"},
-                          "high_res_feature0": {0: "N"},
-                          "high_res_feature1": {0: "N"},
-                          # 输出维度是固定的（除了批次N）
-                          "masks": {0: "N"},
-                          "iou_pred": {0: "N"},
-                          "mask_tokens_out": {0: "N"},
-                          "object_score_logits": {0: "N"}
-                      })
-
-    mask_decoder.forward = original_forward
-    print(f"Exported to {save_path}")
-    if simplify_onnx:
-        simplify_and_save(onnx.load(save_path), save_path.replace(".onnx", "_opt.onnx"))
-
-
-
-# SAM2VideoPredictor 总是会将多物体/多掩码的情况转换成一个更大的批次（batch），
-# 对于 MemoryEncoder 这个独立的模块而言，它永远只会接收到批处理化的单通道掩码输入。
-# 这意味着，在 MemoryEncoder 的视角里，不存在“单掩码 vs 多掩码”这两种模式的区别。
-# 它看到的永远是 (N, 1, H, W) 格式的 masks 和 (N, C, H, W) 格式的 pix_feat，其中 N 是一个可变的批次大小。
-@torch.no_grad()
-def export_memory_encoder_with_assertions(onnx_name="video_memory_encoder.onnx", simplify_onnx=True, override=False):
-    """
-    导出 Memory Encoder，并验证其对输入批次大小变化的响应。
-    【最终无Wrapper、无新方法版】：通过修改原始 forward 并直接导出 inference_memory 实现。
-    """
-    global predictor, onnx_path
-    print("\n--- [Memory Encoder] Assertion and Export ---")
-    os.makedirs(onnx_path, exist_ok=True)
-    save_path = os.path.join(onnx_path, onnx_name)
-    if os.path.exists(save_path) and not override:
-        print(f"Skipping, {save_path} already exists.")
-        return
-
-    module = predictor.memory_encoder
-    original_forward = module.forward
-    module.forward = module.inference_memory
-
-    # --- 验证阶段 ---
-    print(">>> 1. Assertion Phase: Verifying dynamic batch size...")
-
-    # 场景 1: 基准输入 (批次大小 N=1)
-    print("  - Running with baseline input (N=1)...")
-    pix_feat_base = torch.randn(1, 256, 64, 64, device=device)
-    mask_base = torch.rand(1, 1, 1024, 1024, device=device)
-    args_base = (pix_feat_base, mask_base)
-    base_mem_feat, _ = module.forward(*args_base)  # 调用的是 inference_memory
-    print(f"    Baseline output shape: {base_mem_feat.shape}")
-
-    # 场景 2: 可变输入 (批次大小 N=3)
-    print("  - Running with variant input (N=3)...")
-    pix_feat_variant = torch.randn(3, 256, 64, 64, device=device)
-    mask_variant = torch.rand(3, 1, 1024, 1024, device=device)
-    args_variant = (pix_feat_variant, mask_variant)
-    variant_mem_feat, _ = module.forward(*args_variant)  # 调用的是 inference_memory
-    print(f"    Variant output shape: {variant_mem_feat.shape}")
-
+    # 使用两个场景来模拟动态性：不同的批次大小和不同的 memory 长度
+    # 场景 1: Batch=1, Memory SeqLen=4100
+    print("  - Simulating with Batch=1, Memory SeqLen=4100...")
+    N1 = 1
+    mem_seq_len1 = 4100
+    curr1 = torch.randn(curr_seq_len, N1, d_model, device=device)
+    curr_pos1 = torch.randn(curr_seq_len, N1, d_model, device=device)
+    mem1 = torch.randn(mem_seq_len1, N1, mem_dim, device=device)
+    mem_pos1 = torch.randn(mem_seq_len1, N1, mem_dim, device=device)
+    args1 = (curr1, mem1, curr_pos1, mem_pos1)
+    
+    # 场景 2: Batch=3, Memory SeqLen=8200 (用于导出)
+    print("  - Simulating with Batch=3, Memory SeqLen=8200...")
+    N2 = 3
+    mem_seq_len2 = 8200
+    curr2 = torch.randn(curr_seq_len, N2, d_model, device=device)
+    curr_pos2 = torch.randn(curr_seq_len, N2, d_model, device=device)
+    mem2 = torch.randn(mem_seq_len2, N2, mem_dim, device=device)
+    mem_pos2 = torch.randn(mem_seq_len2, N2, mem_dim, device=device)
+    args2 = (curr2, mem2, curr_pos2, mem_pos2)
+    
     # 断言验证
-    print("  - Asserting shape changes...")
-    assert variant_mem_feat.shape[0] == 3
-    assert base_mem_feat.shape[1:] == variant_mem_feat.shape[1:]
-    print("  - Assertions PASSED: Model correctly handles dynamic batch size.")
+    output1 = onnx_export_model(*args1)
+    output2 = onnx_export_model(*args2)
+    assert output1.shape == (curr_seq_len, N1, d_model)
+    assert output2.shape == (curr_seq_len, N2, d_model)
+    print("  - Assertions PASSED: Model correctly handles dynamic batch and memory token dimensions.")
 
-    # --- 导出阶段 ---
+    # 导出
     print("\n>>> 2. Export Phase...")
+    input_names = ["current_vision_features", "memory_features", "current_pos_enc", "memory_pos_enc"]
+    output_names = ["fused_vision_features"]
+    
+    dynamic_axes = {
+        "current_vision_features": {1: "N"},               # Batch is dynamic
+        "memory_features": {0: "num_memory_tokens", 1: "N"}, # SeqLen and Batch are dynamic
+        "current_pos_enc": {1: "N"},
+        "memory_pos_enc": {0: "num_memory_tokens", 1: "N"},
+        "fused_vision_features": {1: "N"},
+    }
 
-    # 直接导出 module，因为它的 forward 现在指向 inference_memory，是完全 ONNX 友好的
     torch.onnx.export(
-        module,
-        args_variant,
+        onnx_export_model,
+        args2, # 使用场景2的参数进行导出
         save_path,
         export_params=True,
         opset_version=17,
         do_constant_folding=True,
-        input_names=["pixel_features", "mask_for_memory"],
-        output_names=["mask_memory_features", "mask_memory_pos_enc"],
-        dynamic_axes={
-            "pixel_features": {0: "N"},
-            "mask_for_memory": {0: "N"},
-            "mask_memory_features": {0: "N"},
-            "mask_memory_pos_enc": {0: "N"}
-        }
+        input_names=input_names,
+        output_names=output_names,
+        dynamic_axes=dynamic_axes
     )
-
-    # 清理现场，恢复原始的 forward 方法
-    module.forward = original_forward
-
+    
     print(f"Exported to {save_path}")
     if simplify_onnx:
         simplify_and_save(onnx.load(save_path), save_path.replace(".onnx", "_opt.onnx"))

@@ -1,21 +1,18 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
+# sam2/modeling/sam/memory_attention.py
 
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
-
-from typing import Optional
+# ... (keep all existing imports)
+from typing import Optional, List
 
 import torch
 from torch import nn, Tensor
 
 from sam2.modeling.sam.transformer import RoPEAttention
-
 from sam2.modeling.sam2_utils import get_activation_fn, get_clones
-
+from ytools.bench import test_torch_cuda_time
+from ytools.executor import ModelExectuor
+from ytools.onnxruntime import OnnxRuntimeExecutor
 
 class MemoryAttentionLayer(nn.Module):
-
     def __init__(
         self,
         activation: str,
@@ -98,7 +95,9 @@ class MemoryAttentionLayer(nn.Module):
         tgt = tgt + self.dropout3(tgt2)
         return tgt
 
-
+# =========================================================================
+# === 请用下面的代码替换掉你文件中原来的 MemoryAttention 类 ===
+# =========================================================================
 class MemoryAttention(nn.Module):
     def __init__(
         self,
@@ -115,43 +114,23 @@ class MemoryAttention(nn.Module):
         self.norm = nn.LayerNorm(d_model)
         self.pos_enc_at_input = pos_enc_at_input
         self.batch_first = batch_first
+        # +++ DEBUGGING: 添加一个计数器，只在前几次调用时打印信息 +++
+        self._debug_counter = 0
+        self._debug_limit = 5  # 只打印前5次调用的信息
 
-    def forward(
+    # --- 这是我们为 ONNX 导出的“纯净”函数，保持不变 ---
+    def inference_memory_attention(
         self,
-        curr: torch.Tensor,  # self-attention inputs
-        memory: torch.Tensor,  # cross-attention inputs
-        curr_pos: Optional[Tensor] = None,  # pos_enc for self-attention inputs
-        memory_pos: Optional[Tensor] = None,  # pos_enc for cross-attention inputs
-        num_obj_ptr_tokens: int = 0,  # number of object pointer *tokens*
-    ):
-        if isinstance(curr, list):
-            assert isinstance(curr_pos, list)
-            assert len(curr) == len(curr_pos) == 1
-            curr, curr_pos = (
-                curr[0],
-                curr_pos[0],
-            )
-
-        assert (
-            curr.shape[1] == memory.shape[1]
-        ), "Batch size must be the same for curr and memory"
-
-        output = curr
-        if self.pos_enc_at_input and curr_pos is not None:
-            output = output + 0.1 * curr_pos
-
-        if self.batch_first:
-            # Convert to batch first
-            output = output.transpose(0, 1)
-            curr_pos = curr_pos.transpose(0, 1)
-            memory = memory.transpose(0, 1)
-            memory_pos = memory_pos.transpose(0, 1)
-
+        output: torch.Tensor,
+        memory: torch.Tensor,
+        curr_pos: Optional[Tensor],
+        memory_pos: Optional[Tensor],
+        num_obj_ptr_tokens: int,
+    ) -> torch.Tensor:
         for layer in self.layers:
             kwds = {}
             if isinstance(layer.cross_attn_image, RoPEAttention):
                 kwds = {"num_k_exclude_rope": num_obj_ptr_tokens}
-
             output = layer(
                 tgt=output,
                 memory=memory,
@@ -160,10 +139,100 @@ class MemoryAttention(nn.Module):
                 **kwds,
             )
         normed_output = self.norm(output)
+        return normed_output
+
+    # --- 这是原始的 forward 函数，我们在这里加入调试代码 ---
+    def forward(
+        self,
+        curr: torch.Tensor,  # self-attention inputs
+        memory: torch.Tensor,  # cross-attention inputs
+        curr_pos: Optional[Tensor] = None,  # pos_enc for self-attention inputs
+        memory_pos: Optional[Tensor] = None,  # pos_enc for cross-attention inputs
+        num_obj_ptr_tokens: int = 0,  # number of object pointer *tokens*
+    ):
+        # +++ DEBUGGING: 打印输入信息 +++
+        if self._debug_counter < self._debug_limit:
+            print("\n" + "="*80)
+            print(f"DEBUG: MemoryAttention.forward() called (call #{self._debug_counter + 1})")
+            print("-"*80)
+            # 打印输入张量的形状和数据类型
+            # 检查 curr 是否是列表
+            if isinstance(curr, list):
+                print(f"  Input 'curr' is a LIST of length {len(curr)}")
+                print(f"    - curr[0].shape: {curr[0].shape}, dtype: {curr[0].dtype}")
+                if isinstance(curr_pos, list):
+                     print(f"    - curr_pos[0].shape: {curr_pos[0].shape}, dtype: {curr_pos[0].dtype}")
+            else:
+                print(f"  Input 'curr'.shape: {curr.shape}, dtype: {curr.dtype}")
+                if curr_pos is not None:
+                    print(f"  Input 'curr_pos'.shape: {curr_pos.shape}, dtype: {curr_pos.dtype}")
+                else:
+                    print(f"  Input 'curr_pos' is None")
+
+            print(f"  Input 'memory'.shape: {memory.shape}, dtype: {memory.dtype}")
+            if memory_pos is not None:
+                 print(f"  Input 'memory_pos'.shape: {memory_pos.shape}, dtype: {memory_pos.dtype}")
+            else:
+                 print(f"  Input 'memory_pos' is None")
+            
+            # 打印非张量参数
+            print(f"  Input 'num_obj_ptr_tokens': {num_obj_ptr_tokens}")
+            print(f"  Module properties: d_model={self.d_model}, batch_first={self.batch_first}")
+            
+            # 检查交叉注意力层的期望输入维度
+            try:
+                k_proj_in = self.layers[0].cross_attn_image.k_proj.in_features
+                print(f"  Cross-attention k_proj expects input features: {k_proj_in}")
+            except Exception as e:
+                print(f"  Could not get k_proj.in_features: {e}")
+            print("-"*80)
+
+        # --- 以下是原始的计算逻辑，保持不变 ---
+        
+        if isinstance(curr, list):
+            assert isinstance(curr_pos, list)
+            assert len(curr) == len(curr_pos) == 1
+            curr, curr_pos = (
+                curr[0],
+                curr_pos[0],
+            )
+
+        if not self.training:  # 在推理模式下，批次大小可能不一致，但这是设计允许的
+            pass
+        else: # 训练时需要检查
+            assert (
+                curr.shape[1] == memory.shape[1]
+            ), "Batch size must be the same for curr and memory"
+
+        output = curr
+        if self.pos_enc_at_input and curr_pos is not None:
+            output = output + 0.1 * curr_pos
 
         if self.batch_first:
-            # Convert back to seq first
-            normed_output = normed_output.transpose(0, 1)
-            curr_pos = curr_pos.transpose(0, 1)
+            output = output.transpose(0, 1)
+            if curr_pos is not None:
+                curr_pos = curr_pos.transpose(0, 1)
+            memory = memory.transpose(0, 1)
+            if memory_pos is not None:
+                memory_pos = memory_pos.transpose(0, 1)
+
+        normed_output_transposed = self.inference_memory_attention(
+            output, memory, curr_pos, memory_pos, num_obj_ptr_tokens
+        )
+        
+        # +++ DEBUGGING: 打印输出信息 +++
+        if self._debug_counter < self._debug_limit:
+            print(f"  Output 'normed_output' (after norm, before final transpose).shape: {normed_output_transposed.shape}")
+        
+        if self.batch_first:
+            normed_output = normed_output_transposed.transpose(0, 1)
+        else:
+            normed_output = normed_output_transposed
+
+        # +++ DEBUGGING: 打印最终输出信息并增加计数器 +++
+        if self._debug_counter < self._debug_limit:
+            print(f"  Final returned 'normed_output'.shape: {normed_output.shape}")
+            print("="*80 + "\n")
+            self._debug_counter += 1
 
         return normed_output

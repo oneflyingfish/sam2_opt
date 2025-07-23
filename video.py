@@ -106,34 +106,35 @@ if __name__ == "__main__":
     # --- 2. 后端配置 ---
 
     # 选项 A: 默认 PyTorch 后端
-    print("\n--- 使用 PyTorch 后端 ---")
-    predictor.set_runtime_backend(backend="torch")
+    # print("\n--- 使用 PyTorch 后端 ---")
+    # predictor.set_runtime_backend(backend="torch")
 
     # 选项 B: ONNX Runtime 后端 (只加速 MemoryEncoder 和 PromptEncoder)
-    # print("\n--- 使用 ONNX Runtime 后端 ---")
-    # # 根据你的需求，只配置 memory 和 prompt encoder
-    # onnx_paths = [
-    #     "models_video/video_memory_encoder_opt.onnx",  # [0] for memory_encoder
-    #     "models_video/video_prompt_encoder_opt.onnx",  # [1] for prompt_encoder
-    # ]
+    print("\n--- 使用 ONNX Runtime 后端 ---")
+    # 根据你的需求，只配置 memory 和 prompt encoder
+    onnx_paths = [
+        "models_video/video_memory_encoder_opt.onnx",  # [0] for memory_encoder
+        "models_video/video_prompt_encoder_opt.onnx",  # [1] for prompt_encoder
+        
+    ]
 
     # 检查 ONNX 文件是否存在
-    # for path in onnx_paths:
-    #     if not os.path.exists(path):
-    #         raise FileNotFoundError(f"ONNX 模型文件未找到: {path}. 请先运行导出脚本。")
+    for path in onnx_paths:
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"ONNX 模型文件未找到: {path}. 请先运行导出脚本。")
 
-    # print("成功set_onnxruntime_backend")
-    # predictor.set_runtime_backend(
-    #     backend="onnxruntime",
-    #     args={
-    #         "model_paths": onnx_paths,
-    #         "providers": [
-    #             "TensorrtExecutionProvider",
-    #             "CUDAExecutionProvider",
-    #             "CPUExecutionProvider",
-    #         ],
-    #     },
-    # )
+    print("成功set_onnxruntime_backend")
+    predictor.set_runtime_backend(
+        backend="onnxruntime",
+        args={
+            "model_paths": onnx_paths,
+            "providers": [
+                "TensorrtExecutionProvider",
+                "CUDAExecutionProvider",
+                "CPUExecutionProvider",
+            ],
+        },
+    )
 
     # --- 3. 运行推理 ---
     video_path = "./sam2/notebooks/videos/bedroom.mp4"

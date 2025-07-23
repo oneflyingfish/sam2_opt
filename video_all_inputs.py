@@ -152,13 +152,13 @@ if __name__ == "__main__":
     # 选择要测试的模式
 
     # --- 1: 多点输入 (前景+背景) ---
-    # print("测试模式: 多点输入")
-    # input_points = np.array([[257, 176], [235, 286]])  # 前景点 + 背景点
-    # input_labels = np.array([1, 0])  # 前景标签 + 背景标签
-    # final_masks = run_segmentation(
-    #     predictor, video_path, initial_frame_idx, object_id,
-    #     points=input_points, labels=input_labels
-    # )
+    print("测试模式: 多点输入")
+    input_points = np.array([[257, 176], [235, 286]])  # 前景点 + 背景点
+    input_labels = np.array([1, 0])  # 前景标签 + 背景标签
+    final_masks = run_segmentation(
+        predictor, video_path, initial_frame_idx, object_id,
+        points=input_points, labels=input_labels
+    )
 
     # --- 2: 边界框输入 ---
     # print("测试模式: 边界框输入")
@@ -169,14 +169,14 @@ if __name__ == "__main__":
     # )
 
     # # --- 3: 边界框 + 一个前景点 ---
-    print("测试模式: 边界框 + 前景点")
-    input_points = np.array([[257, 176]]) # 小孩身上的点
-    input_labels = np.array([1])
-    input_box = np.array([161, 138, 291, 415]) # 大致框住小孩的框
-    final_masks = run_segmentation(
-        predictor, video_path, initial_frame_idx, object_id,
-        points=input_points, labels=input_labels, box=input_box
-    )
+    # print("测试模式: 边界框 + 前景点")
+    # input_points = np.array([[257, 176]]) # 小孩身上的点
+    # input_labels = np.array([1])
+    # input_box = np.array([161, 138, 291, 415]) # 大致框住小孩的框
+    # final_masks = run_segmentation(
+    #     predictor, video_path, initial_frame_idx, object_id,
+    #     points=input_points, labels=input_labels, box=input_box
+    # )
 
     # =================================================================
 

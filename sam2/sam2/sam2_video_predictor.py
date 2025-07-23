@@ -65,6 +65,10 @@ class SAM2VideoPredictor(SAM2Base):
             if hasattr(self, "sam_prompt_encoder") and hasattr(self.sam_prompt_encoder, "set_runtime_backend"):
                 self.sam_prompt_encoder.set_runtime_backend(backend="torch")
 
+            #  # --- 新增: 控制 MemoryAttention ---
+            # if hasattr(self, "memory_attention") and hasattr(self.memory_attention, "set_runtime_backend"):
+            #     self.memory_attention.set_runtime_backend("torch")
+
         elif backend.lower() == "onnxruntime":
             assert args and "model_paths" in args, '需要提供 "model_paths" 参数来设置 ONNX 路径'
 
@@ -96,6 +100,13 @@ class SAM2VideoPredictor(SAM2Base):
             else:
                 if hasattr(self, "sam_prompt_encoder") and hasattr(self.sam_prompt_encoder, "set_runtime_backend"):
                     self.sam_prompt_encoder.set_runtime_backend(backend="torch")
+
+            # # --- 新增: 配置 Memory Attention ---
+            # if "memory_attention" in model_paths:
+            #     print("Configuring ONNX backend for MemoryAttention...")
+            #     onnx_args["model_paths"] = [model_paths["memory_attention"]]
+            #     if hasattr(self, "memory_attention") and hasattr(self.memory_attention, "set_runtime_backend"):
+            #         self.memory_attention.set_runtime_backend("onnxruntime", args=onnx_args)
         else:
             raise ValueError(f"不支持的后端: {backend}")
 
