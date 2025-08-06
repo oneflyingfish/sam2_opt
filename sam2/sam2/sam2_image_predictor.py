@@ -61,15 +61,12 @@ class SAM2ImagePredictor(nn.Module):
         # Predictor config
         self.mask_threshold = mask_threshold
 
-        # Spatial dim for backbone feature maps
-        self._bb_feat_sizes = [
-            (256, 256),
-            (128, 128),
-            (64, 64),
-        ]
-
         self.backend_contexts = []  # type: List[ModelExectuor]
         self.set_image_e2e = self.set_image_e2e_torch
+        
+        # Add a forward attribute for compatibility with ONNX export scripts
+        self.forward = None
+
 
     @classmethod
     def from_pretrained(cls, model_id: str, **kwargs) -> "SAM2ImagePredictor":
@@ -144,12 +141,8 @@ class SAM2ImagePredictor(nn.Module):
     ) -> None:
         """
         Calculates the image embeddings for the provided image, allowing
-        masks to be predicted with the 'predict' method.
-
-        Arguments:
-          image (np.ndarray or PIL Image): The input image to embed in RGB format. The image should be in HWC format if np.ndarray, or WHC format if PIL Image
-          with pixel values in [0, 255].
-          image_format (str): The color format of the image, in ['RGB', 'BGR'].
+        masks to be predicted with the 'predict' method. The behavior of this
+        method is unchanged for the user.
         """
         self.reset_predictor()
         # Transform the image to the form expected by the model
@@ -163,44 +156,46 @@ class SAM2ImagePredictor(nn.Module):
         else:
             raise NotImplementedError("Image format not supported")
 
-        # input_image = self._transforms.to_tensor(image)
-
-        # input_image = self._transforms(image)
-        # input_image = input_image[None, ...].to(self.device)
-
-        self._set_image_([image])
+        # Wrap the single image in a list to use the generalized _set_image_ method
+        self._set_image_([image]) 
 
     @torch.no_grad()
-    def _set_image_(self, images):
-        images = torch.stack(
-            [torch.from_numpy(image).to(self.device) for image in images]
-        ).movedim(3, 1)
-        assert (
-            len(images.shape) == 4 and images.shape[1] == 3
-        ), f"input_image must be of size 1x3xHxW, got {images.shape}"
-        logging.info("Computing image embeddings for the provided image...")
-        # backbone_out = self.model.forward_image(input_image)
-        # _, vision_feats, _, _ = self.model._prepare_backbone_features(backbone_out)
-        # # Add no_mem_embed, which is added to the lowest rest feat. map during training on videos
-        # if self.model.directly_add_no_mem_embed:
-        #     vision_feats[-1] = vision_feats[-1] + self.model.no_mem_embed
+    def _set_image_(self, images: List[np.ndarray]):
+        """
+        Computes image embeddings for a list of images by processing them sequentially
+        in a loop to manage memory usage.
+        """
+        num_images = len(images)
+        if num_images == 0:
+            self.reset_predictor()
+            logging.warning("Input image list is empty. Predictor has been reset.")
+            return
 
-        # feats = [
-        #     feat.permute(1, 2, 0).view(1, -1, *feat_size)
-        #     for feat, feat_size in zip(vision_feats[::-1], self._bb_feat_sizes[::-1])
-        # ][::-1]
+        logging.info(f"Processing {num_images} image(s) sequentially...")
 
-        images = self._transforms.resize(images / 255.0)
-        # feats = self.model.inference_image_for_set_image(images)
+        all_feats = []
+        img_tensor = []
+        for i in range(num_images):
+            img_tensor.append(self._transforms.resize(torch.from_numpy(images[i]).to(self.device).movedim(-1, 0)))
+   
+        img_tensor = torch.stack(img_tensor,dim=0) / 255.0
 
-        feats = self.set_image_e2e(images)
+        for i in range(img_tensor.size(0)):
+            current_feats = self.set_image_e2e(img_tensor[i:i+1])  
+            for j, feat in enumerate(current_feats):
+                while j >= len(all_feats):
+                    all_feats.append([])
+                all_feats[j].append(feat.squeeze(0))   
 
-        # for feat in feats:
-        #     print(f"{feat.shape}")
-        self._features = {"image_embed": feats[-1], "high_res_feats": feats[:-1]}
+        all_feats = [torch.stack(feat_list, dim=0) for feat_list in all_feats]
+        
+        self._features = {"image_embed": all_feats[-1],            
+                          "high_res_feats": all_feats[:-1]}     
+
         self._is_image_set = True
-        logging.info("Image embeddings computed.")
+        logging.info("Image embeddings computed for all images.")
 
+        
     def set_runtime_backend(self, backend="torch", args: dict = None):
         if self.backend_contexts is not None:
             for context in self.backend_contexts:
@@ -278,49 +273,27 @@ class SAM2ImagePredictor(nn.Module):
     @torch.no_grad()
     def set_image_batch(
         self,
-        image_list: List[Union[np.ndarray]],
+        image_list: List[np.ndarray],
     ) -> None:
         """
         Calculates the image embeddings for the provided image batch, allowing
         masks to be predicted with the 'predict_batch' method.
-
-        Arguments:
-          image_list (List[np.ndarray]): The input images to embed in RGB format. The image should be in HWC format if np.ndarray
-          with pixel values in [0, 255].
         """
         self.reset_predictor()
-        assert isinstance(image_list, list)
+        if not isinstance(image_list, list) or not image_list:
+             raise ValueError("image_list must be a non-empty list of numpy arrays.")
+             
         self._orig_hw = []
         for image in image_list:
-            assert isinstance(
-                image, np.ndarray
-            ), "Images are expected to be an np.ndarray in RGB format, and of shape  HWC"
+            assert isinstance(image, np.ndarray), "Images must be numpy arrays in HWC format."
             self._orig_hw.append(image.shape[:2])
-        # Transform the image to the form expected by the model
+            
+        # Call the generalized _set_image_ method
         self._set_image_(image_list)
 
-        # img_batch = self._transforms.forward_batch(image_list)
-        # img_batch = img_batch.to(self.device)
-        # batch_size = img_batch.shape[0]
-        # assert (
-        #     len(img_batch.shape) == 4 and img_batch.shape[1] == 3
-        # ), f"img_batch must be of size Bx3xHxW, got {img_batch.shape}"
-        # logging.info("Computing image embeddings for the provided images...")
-        # # backbone_out = self.model.forward_image(img_batch)
-        # # _, vision_feats, _, _ = self.model._prepare_backbone_features(backbone_out)
-        # # # Add no_mem_embed, which is added to the lowest rest feat. map during training on videos
-        # # if self.model.directly_add_no_mem_embed:
-        # #     vision_feats[-1] = vision_feats[-1] + self.model.no_mem_embed
-
-        # # feats = [
-        # #     feat.permute(1, 2, 0).view(batch_size, -1, *feat_size)
-        # #     for feat, feat_size in zip(vision_feats[::-1], self._bb_feat_sizes[::-1])
-        # # ][::-1]
-        # feats = self.model.inference_image_for_set_image(img_batch)
-        # self._features = {"image_embed": feats[-1], "high_res_feats": feats[:-1]}
-        # self._is_image_set = True
-        # self._is_batch = True
-        # logging.info("Image embeddings computed.")
+        # Set the batch flag to true after setting the image features
+        if self._is_image_set:
+            self._is_batch = True
 
     def predict_batch(
         self,
@@ -335,11 +308,16 @@ class SAM2ImagePredictor(nn.Module):
         """This function is very similar to predict(...), however it is used for batched mode, when the model is expected to generate predictions on multiple images.
         It returns a tuple of lists of masks, ious, and low_res_masks_logits.
         """
-        assert self._is_batch, "This function should only be used when in batched mode"
+        if not self._is_batch:
+            if self._is_image_set:
+                raise RuntimeError("Predictor was set with a single image via `set_image`. Use `predict` instead of `predict_batch`.")
+            raise RuntimeError("This function should only be used when in batched mode. Call `set_image_batch` first.")
+
         if not self._is_image_set:
             raise RuntimeError(
                 "An image must be set with .set_image_batch(...) before mask prediction."
             )
+            
         num_images = len(self._features["image_embed"])
         all_masks = []
         all_ious = []
@@ -397,44 +375,17 @@ class SAM2ImagePredictor(nn.Module):
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Predict masks for the given input prompts, using the currently set image.
-
-        Arguments:
-          point_coords (np.ndarray or None): A Nx2 array of point prompts to the
-            model. Each point is in (X,Y) in pixels.
-          point_labels (np.ndarray or None): A length N array of labels for the
-            point prompts. 1 indicates a foreground point and 0 indicates a
-            background point.
-          box (np.ndarray or None): A length 4 array given a box prompt to the
-            model, in XYXY format.
-          mask_input (np.ndarray): A low resolution mask input to the model, typically
-            coming from a previous prediction iteration. Has form 1xHxW, where
-            for SAM, H=W=256.
-          multimask_output (bool): If true, the model will return three masks.
-            For ambiguous input prompts (such as a single click), this will often
-            produce better masks than a single prediction. If only a single
-            mask is needed, the model's predicted quality score can be used
-            to select the best mask. For non-ambiguous prompts, such as multiple
-            input prompts, multimask_output=False can give better results.
-          return_logits (bool): If true, returns un-thresholded masks logits
-            instead of a binary mask.
-          normalize_coords (bool): If true, the point coordinates will be normalized to the range [0,1] and point_coords is expected to be wrt. image dimensions.
-
-        Returns:
-          (np.ndarray): The output masks in CxHxW format, where C is the
-            number of masks, and (H, W) is the original image size.
-          (np.ndarray): An array of length C containing the model's
-            predictions for the quality of each mask.
-          (np.ndarray): An array of shape CxHxW, where C is the number
-            of masks and H=W=256. These low resolution logits can be passed to
-            a subsequent iteration as mask input.
         """
         if not self._is_image_set:
             raise RuntimeError(
                 "An image must be set with .set_image(...) before mask prediction."
             )
+        if self._is_batch:
+            raise RuntimeError(
+                "Predictor was set with a batch of images via `set_image_batch`. Use `predict_batch` instead of `predict`."
+            )
 
         # Transform input prompts
-
         mask_input, unnorm_coords, labels, unnorm_box = self._prep_prompts(
             point_coords, point_labels, box, mask_input, normalize_coords
         )
@@ -454,8 +405,13 @@ class SAM2ImagePredictor(nn.Module):
         return masks_np, iou_predictions_np, low_res_masks_np
 
     def _prep_prompts(
-        self, point_coords, point_labels, box, mask_logits, normalize_coords, img_idx=-1
+        self, point_coords, point_labels, box, mask_logits, normalize_coords, img_idx: int = -1
     ):
+        # In batch mode, img_idx must be valid.
+        # In single image mode, self._orig_hw has one element, so img_idx=0 is correct.
+        current_img_idx = img_idx if self._is_batch else 0
+        if self._is_batch and img_idx == -1:
+            raise ValueError("In batch mode, a valid `img_idx` must be provided.")
 
         unnorm_coords, labels, unnorm_box, mask_input = None, None, None, None
         if point_coords is not None:
@@ -466,7 +422,7 @@ class SAM2ImagePredictor(nn.Module):
                 point_coords, dtype=torch.float, device=self.device
             )
             unnorm_coords = self._transforms.transform_coords(
-                point_coords, normalize=normalize_coords, orig_hw=self._orig_hw[img_idx]
+                point_coords, normalize=normalize_coords, orig_hw=self._orig_hw[current_img_idx]
             )
             labels = torch.as_tensor(point_labels, dtype=torch.int, device=self.device)
             if len(unnorm_coords.shape) == 2:
@@ -474,7 +430,7 @@ class SAM2ImagePredictor(nn.Module):
         if box is not None:
             box = torch.as_tensor(box, dtype=torch.float, device=self.device)
             unnorm_box = self._transforms.transform_boxes(
-                box, normalize=normalize_coords, orig_hw=self._orig_hw[img_idx]
+                box, normalize=normalize_coords, orig_hw=self._orig_hw[current_img_idx]
             )  # Bx2x2
         if mask_logits is not None:
             mask_input = torch.as_tensor(
@@ -497,44 +453,18 @@ class SAM2ImagePredictor(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Predict masks for the given input prompts, using the currently set image.
-        Input prompts are batched torch tensors and are expected to already be
-        transformed to the input frame using SAM2Transforms.
-
-        Arguments:
-          point_coords (torch.Tensor or None): A BxNx2 array of point prompts to the
-            model. Each point is in (X,Y) in pixels.
-          point_labels (torch.Tensor or None): A BxN array of labels for the
-            point prompts. 1 indicates a foreground point and 0 indicates a
-            background point.
-          boxes (np.ndarray or None): A Bx4 array given a box prompt to the
-            model, in XYXY format.
-          mask_input (np.ndarray): A low resolution mask input to the model, typically
-            coming from a previous prediction iteration. Has form Bx1xHxW, where
-            for SAM, H=W=256. Masks returned by a previous iteration of the
-            predict method do not need further transformation.
-          multimask_output (bool): If true, the model will return three masks.
-            For ambiguous input prompts (such as a single click), this will often
-            produce better masks than a single prediction. If only a single
-            mask is needed, the model's predicted quality score can be used
-            to select the best mask. For non-ambiguous prompts, such as multiple
-            input prompts, multimask_output=False can give better results.
-          return_logits (bool): If true, returns un-thresholded masks logits
-            instead of a binary mask.
-
-        Returns:
-          (torch.Tensor): The output masks in BxCxHxW format, where C is the
-            number of masks, and (H, W) is the original image size.
-          (torch.Tensor): An array of shape BxC containing the model's
-            predictions for the quality of each mask.
-          (torch.Tensor): An array of shape BxCxHxW, where C is the number
-            of masks and H=W=256. These low res logits can be passed to
-            a subsequent iteration as mask input.
         """
         if not self._is_image_set:
             raise RuntimeError(
                 "An image must be set with .set_image(...) before mask prediction."
             )
 
+        # In batch mode, img_idx must be valid.
+        # In single image mode, feature tensors have a batch dim of 1, so img_idx=0 is correct.
+        current_img_idx = img_idx if self._is_batch else 0
+        if self._is_batch and img_idx == -1:
+            raise ValueError("In batch mode, a valid `img_idx` must be provided.")
+            
         if point_coords is not None:
             concat_points = (point_coords, point_labels)
         else:
@@ -545,8 +475,6 @@ class SAM2ImagePredictor(nn.Module):
             box_coords = boxes.reshape(-1, 2, 2)
             box_labels = torch.tensor([[2, 3]], dtype=torch.int, device=boxes.device)
             box_labels = box_labels.repeat(boxes.size(0), 1)
-            # we merge "boxes" and "points" into a single "concat_points" input (where
-            # boxes are added at the beginning) to sam_prompt_encoder
             if concat_points is not None:
                 concat_coords = torch.cat([box_coords, concat_points[0]], dim=1)
                 concat_labels = torch.cat([box_labels, concat_points[1]], dim=1)
@@ -564,12 +492,16 @@ class SAM2ImagePredictor(nn.Module):
         batched_mode = (
             concat_points is not None and concat_points[0].shape[0] > 1
         )  # multi object prediction
+        
+        # Select the features for the correct image index
         high_res_features = [
-            feat_level[img_idx].unsqueeze(0)
-            for feat_level in self._features["high_res_feats"]
+            feat_level[current_img_idx].unsqueeze(0)            # (1, C, H, W)
+            for feat_level in self._features["high_res_feats"]      
         ]
+        image_embed = self._features["image_embed"][current_img_idx].unsqueeze(0)  
+
         low_res_masks, iou_predictions, _, _ = self.model.sam_mask_decoder(
-            image_embeddings=self._features["image_embed"][img_idx].unsqueeze(0),
+            image_embeddings=image_embed,
             image_pe=self.model.sam_prompt_encoder.get_dense_pe(),
             sparse_prompt_embeddings=sparse_embeddings,
             dense_prompt_embeddings=dense_embeddings,
@@ -580,7 +512,7 @@ class SAM2ImagePredictor(nn.Module):
 
         # Upscale the masks to the original image resolution
         masks = self._transforms.postprocess_masks(
-            low_res_masks, self._orig_hw[img_idx]
+            low_res_masks, self._orig_hw[current_img_idx]
         )
         low_res_masks = torch.clamp(low_res_masks, -32.0, 32.0)
         if not return_logits:

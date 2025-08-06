@@ -14,7 +14,6 @@ from sam2.modeling.sam.transformer import RoPEAttention
 from sam2.modeling.sam2_utils import get_activation_fn, get_clones
 from ytools.executor import ModelExectuor
 
-
 class MemoryAttentionLayer(nn.Module):
 
     def __init__(
@@ -295,7 +294,7 @@ class MemoryAttention(nn.Module):
             return self.inference_memory_attention_exclude(*inputs)
         else:
             return self.inference_memory_attention_none(*inputs)
-
+        
     def inference_memory_attention_torch(
         self,
         curr: torch.Tensor,
@@ -357,11 +356,20 @@ class MemoryAttention(nn.Module):
         memory_exclude: Optional[Tensor] = None,
         memory_pos_exclude: Optional[Tensor] = None,
     ) -> Tensor:
-        outs = self.backend_contexts[1].Inference(
-            [curr, memory, curr_pos, memory_pos, memory_exclude, memory_pos_exclude],
-            output_type="torch",
-        )
-        return outs[0].to(memory.device)
+        results = []
+        for i in range(curr.shape[1]):
+            outs = self.backend_contexts[1].Inference(
+                [curr.narrow(dim=1,start=i,length=1), 
+                memory.narrow(dim=2,start=i,length=1), 
+                curr_pos.narrow(dim=1,start=i,length=1), 
+                memory_pos.narrow(dim=2,start=i,length=1), 
+                memory_exclude.narrow(dim=1,start=i,length=1), 
+                memory_pos_exclude.narrow(dim=1,start=i,length=1)],
+                output_type="torch",
+            )
+            results.append(outs[0].to(memory.device))
+        return torch.cat(results, dim=1)
+
 
     def inference_memory_attention_speedup_none(
         self,
